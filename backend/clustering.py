@@ -1,35 +1,54 @@
 import numpy as np
 from sklearn.cluster import DBSCAN
-from database import cursor, conn
+from database import conn
+
 
 def run_clustering():
 
-    # fetch orders from database
-    cursor.execute("SELECT id, latitude, longitude FROM orders")
+    # create thread-safe cursor
+    with conn.cursor() as cursor:
 
-    orders = cursor.fetchall()
+        # fetch only orders not dispatched yet
+        cursor.execute("""
+            SELECT id, latitude, longitude
+            FROM orders
+            WHERE dispatched = FALSE
+        """)
 
-    if len(orders) == 0:
-        return "No orders found"
+        orders = cursor.fetchall()
 
-    # convert coordinates into numpy array
-    coords = np.array([[o[1], o[2]] for o in orders])
+        if len(orders) == 0:
+            return []
 
-    # DBSCAN clustering
-    db = DBSCAN(eps=0.02, min_samples=2).fit(coords)
+        coords = np.array([[o[1], o[2]] for o in orders])
 
-    labels = db.labels_
+        # DBSCAN clustering
+        db = DBSCAN(eps=0.05, min_samples=2).fit(coords)
 
-    # update cluster id in database
-    for i, order in enumerate(orders):
+        labels = db.labels_
 
-        cluster_id = int(labels[i])
+        # convert noise (-1) into unique clusters
+        max_cluster = labels.max() + 1
 
-        cursor.execute(
-            "UPDATE orders SET cluster_id=%s WHERE id=%s",
-            (cluster_id, order[0])
-        )
+        for i in range(len(labels)):
+            if labels[i] == -1:
+                labels[i] = max_cluster
+                max_cluster += 1
 
-    conn.commit()
+        # update cluster id in DB
+        for i, order in enumerate(orders):
+
+            cursor.execute(
+                """
+                UPDATE orders
+                SET cluster_id = %s
+                WHERE id = %s
+                """,
+                (int(labels[i]), order[0])
+            )
+
+        conn.commit()
+
+    print("Auto clustering updated")
 
     return labels
