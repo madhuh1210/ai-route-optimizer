@@ -1,56 +1,196 @@
 import streamlit as st
-import folium
 import requests
+import folium
 from streamlit_folium import st_folium
-from folium.plugins import MarkerCluster
+import time
+
+API_URL = "http://127.0.0.1:8000/optimize-route"
 
 st.set_page_config(layout="wide")
 
 st.title("🚚 Delivery Route Optimization Dashboard")
 
-# Call backend API
-response = requests.get("http://127.0.0.1:8000/optimize-route")
-data = response.json()
+# -----------------------------
+# Fetch optimized routes
+# -----------------------------
+try:
 
-# Create map centered around Chennai
-m = folium.Map(location=[13.00, 80.25], zoom_start=12)
+    response = requests.get(API_URL, timeout=30)
 
-colors = ["red", "blue", "green", "purple", "orange"]
+    if response.status_code != 200:
+        st.error(f"Backend API error: {response.status_code}")
+        st.write(response.text)
+        st.stop()
 
-cluster_index = 0
+    data = response.json()
 
-for cluster_name, cluster_data in data.items():
+    if not isinstance(data, dict):
+        st.error("Invalid response from backend")
+        st.stop()
 
-    if cluster_data == "Not enough orders":
+except requests.exceptions.ConnectionError:
+    st.error("Backend server not reachable at http://127.0.0.1:8000")
+    st.stop()
+
+except requests.exceptions.ReadTimeout:
+    st.warning("Backend computing routes... retrying")
+    time.sleep(3)
+    st.rerun()
+
+except Exception as e:
+    st.error(f"API error: {e}")
+    st.stop()
+
+
+# -----------------------------
+# Create base map
+# -----------------------------
+m = folium.Map(
+    location=[13.02, 80.23],
+    zoom_start=11,
+    control_scale=True
+)
+
+truck_colors = [
+    "red",
+    "blue",
+    "green",
+    "purple",
+    "orange"
+]
+
+# -----------------------------
+# Process clusters
+# -----------------------------
+for cluster_name, cluster in data.items():
+
+    if not isinstance(cluster, dict):
         continue
 
-    locations = cluster_data["locations"]
-    route = cluster_data["optimized_route"]
+    hub = cluster.get("hub")
+    locations = cluster.get("locations", [])
+    routes = cluster.get("vehicle_routes", [])
 
-    color = colors[cluster_index % len(colors)]
-    cluster_index += 1
+    if not hub:
+        continue
 
-    # Create marker cluster for overlapping markers
-    marker_cluster = MarkerCluster().add_to(m)
-
-    # Add markers
-    for i, loc in enumerate(locations):
-        folium.Marker(
-            location=loc,
-            popup=f"{cluster_name} - Order {i+1}",
-            icon=folium.Icon(color=color, icon="info-sign")
-        ).add_to(marker_cluster)
-
-    # Draw optimized route
-    route_coords = [locations[i] for i in route]
-
-    folium.PolyLine(
-        route_coords,
-        color=color,
-        weight=4,
-        opacity=0.8,
-        tooltip=f"{cluster_name} route"
+    # Draw hub
+    folium.Marker(
+        location=hub,
+        popup="Farmer Hub",
+        icon=folium.Icon(color="black", icon="home"),
     ).add_to(m)
 
-# Display map
-st_folium(m, width=1200, height=600)
+    # -----------------------------
+    # Draw each truck route
+    # -----------------------------
+    for truck_id, route in enumerate(routes):
+
+        if not route:
+            continue
+
+        color = truck_colors[truck_id % len(truck_colors)]
+        prev_point = hub
+
+        stop_number = 0
+
+        for node in route:
+
+            # skip hub nodes
+            if node == 0:
+                continue
+
+            stop_number += 1
+
+            try:
+                lat, lng = locations[node - 1]
+            except:
+                continue
+
+            truck_number = truck_id + 1
+
+            label = f"{truck_number}-{stop_number}"
+
+            # -----------------------------
+            # Delivery marker
+            # -----------------------------
+            folium.CircleMarker(
+                location=[lat, lng],
+                radius=10,
+                color=color,
+                fill=True,
+                fill_color=color,
+                fill_opacity=0.9,
+                popup=f"Truck {truck_number} | Stop {stop_number}",
+            ).add_to(m)
+
+            folium.Marker(
+                location=[lat, lng],
+                icon=folium.DivIcon(
+                    html=f"""
+                    <div style="
+                        color:white;
+                        font-weight:bold;
+                        text-align:center;
+                        margin-top:-28px;">
+                        {label}
+                    </div>
+                    """
+                ),
+            ).add_to(m)
+
+            # -----------------------------
+            # Draw road route
+            # -----------------------------
+            try:
+
+                url = f"http://router.project-osrm.org/route/v1/driving/{prev_point[1]},{prev_point[0]};{lng},{lat}?overview=full&geometries=geojson"
+
+                r = requests.get(url, timeout=10)
+
+                if r.status_code == 200:
+
+                    route_data = r.json()
+
+                    coords = route_data["routes"][0]["geometry"]["coordinates"]
+
+                    road_points = [(c[1], c[0]) for c in coords]
+
+                    folium.PolyLine(
+                        road_points,
+                        color=color,
+                        weight=4,
+                        opacity=0.9,
+                    ).add_to(m)
+
+                else:
+
+                    folium.PolyLine(
+                        [prev_point, (lat, lng)],
+                        color=color,
+                        weight=2,
+                        dash_array="5",
+                    ).add_to(m)
+
+            except:
+
+                folium.PolyLine(
+                    [prev_point, (lat, lng)],
+                    color=color,
+                    weight=2,
+                    dash_array="5",
+                ).add_to(m)
+
+            prev_point = (lat, lng)
+
+
+# -----------------------------
+# Render map
+# -----------------------------
+st_folium(m, width=1200, height=700)
+
+# -----------------------------
+# Auto refresh dashboard
+# -----------------------------
+time.sleep(10)
+st.rerun()

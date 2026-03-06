@@ -1,43 +1,64 @@
 import requests
+import math
 
-def get_road_distance(coord1, coord2):
 
+def haversine_distance(coord1, coord2):
+    """
+    fallback distance if OSRM fails
+    """
     lat1, lon1 = coord1
     lat2, lon2 = coord2
 
-    url = f"http://router.project-osrm.org/route/v1/driving/{lon1},{lat1};{lon2},{lat2}?overview=false"
+    R = 6371000  # meters
 
-    try:
-        response = requests.get(url)
-        data = response.json()
+    phi1 = math.radians(lat1)
+    phi2 = math.radians(lat2)
 
-        if data["code"] != "Ok":
-            return 9999
+    dphi = math.radians(lat2 - lat1)
+    dlambda = math.radians(lon2 - lon1)
 
-        distance = int(data["routes"][0]["distance"] / 100)
+    a = math.sin(dphi / 2) ** 2 + math.cos(phi1) * math.cos(phi2) * math.sin(dlambda / 2) ** 2
 
-        return distance
-
-    except:
-        return 9999
+    return int(2 * R * math.atan2(math.sqrt(a), math.sqrt(1 - a)))
 
 
 def create_distance_matrix(locations):
 
-    matrix = []
+    try:
 
-    for i in range(len(locations)):
-        row = []
+        # build OSRM coordinate string
+        coords = ";".join([f"{lng},{lat}" for lat, lng in locations])
 
-        for j in range(len(locations)):
+        url = f"http://router.project-osrm.org/table/v1/driving/{coords}?annotations=distance"
 
-            if i == j:
-                row.append(0)
+        response = requests.get(url, timeout=5)
 
-            else:
-                distance = get_road_distance(locations[i], locations[j])
-                row.append(distance)
+        if response.status_code != 200:
+            raise Exception("OSRM failed")
 
-        matrix.append(row)
+        data = response.json()
 
-    return matrix
+        if "distances" not in data:
+            raise Exception("Invalid OSRM response")
+
+        distances = data["distances"]
+
+        matrix = []
+
+        for row in distances:
+            matrix.append([int(d) if d is not None else 0 for d in row])
+
+        return matrix
+
+    except Exception as e:
+
+        # fallback to haversine distance if OSRM fails
+        n = len(locations)
+        matrix = [[0 for _ in range(n)] for _ in range(n)]
+
+        for i in range(n):
+            for j in range(n):
+                if i != j:
+                    matrix[i][j] = haversine_distance(locations[i], locations[j])
+
+        return matrix
